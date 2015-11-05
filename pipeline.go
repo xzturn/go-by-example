@@ -1,4 +1,4 @@
-// Go Concurrency Pattern: Pipelines and Cancellation
+// Go Concurrency Pattern: Pipelines and Cancellation & Worker Pool
 //
 package main
 
@@ -35,6 +35,7 @@ type IFileDigester interface {
 type FileDigester struct {
 }
 
+// walk through all the files and sub-dirs, no concurrency
 func (p FileDigester) walk(root string, files *[]string) error {
     infos, err := ioutil.ReadDir(root)
     if err != nil { return err }
@@ -43,7 +44,7 @@ func (p FileDigester) walk(root string, files *[]string) error {
         case info.Mode().IsRegular():
             *files = append(*files, filepath.Join(root, info.Name()))
         case info.Mode().IsDir():
-            if err := p.walk(filepath.Join(root, info.Name()), files); err != nil {
+            if err = p.walk(filepath.Join(root, info.Name()), files); err != nil {
                 return err
             }
         }
@@ -51,12 +52,7 @@ func (p FileDigester) walk(root string, files *[]string) error {
     return nil
 }
 
-func (p FileDigester) collect(root string) ([]string, error) {
-    files := make([]string, 0)
-    err := p.walk(root, &files)
-    return files, err
-}
-
+// define how each worker work, wait for idx signal or done signal
 func (p FileDigester) md5Worker(files []string, cidx <-chan int, done <-chan struct{}, res *[]result) {
     for {
         select {
@@ -69,14 +65,16 @@ func (p FileDigester) md5Worker(files []string, cidx <-chan int, done <-chan str
     }
 }
 
+// worker pool: collect candicate files first,
+// then use N go routines to process each file, use cancel
 func (p FileDigester) MD5All(root string) (map[string][md5.Size]byte, error) {
     ts := time.Now()
     defer func() {
         fmt.Printf("FileDigester.MD5All() execute time: %v\n", time.Now().Sub(ts))
     }()
 
-    files, err := p.collect(root)
-    if err != nil { return nil, err }
+    files := make([]string, 0)
+    if err := p.walk(root, &files); err != nil { return nil, err }
 
     n := len(files)
     cidx := make(chan int)
@@ -276,6 +274,7 @@ func (p FileDigester2) MD5All(root string) (map[string][md5.Size]byte, error) {
 type FileDigester3 struct {
 }
 
+// for each go routine, it will walk through a directory
 func (p FileDigester3) walk(root string, cpath chan<- string) <-chan error {
     cerr := make(chan error)
     go func() {
@@ -295,6 +294,7 @@ func (p FileDigester3) walk(root string, cpath chan<- string) <-chan error {
     return cerr
 }
 
+// process file by file actually, just collect in concurrent pattern
 func (p FileDigester3) MD5All(root string) (map[string][md5.Size]byte, error) {
     ts := time.Now()
     defer func() {
@@ -318,6 +318,68 @@ func (p FileDigester3) MD5All(root string) (map[string][md5.Size]byte, error) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+type FileDigester4 struct {
+}
+
+// walk through all the files and sub-dirs, collect all candidates
+func (p FileDigester4) walk(root string, files *[]string) error {
+    infos, err := ioutil.ReadDir(root)
+    if err != nil { return err }
+    for _, info := range infos {
+        switch {
+        case info.Mode().IsRegular():
+            *files = append(*files, filepath.Join(root, info.Name()))
+        case info.Mode().IsDir():
+            if err = p.walk(filepath.Join(root, info.Name()), files); err != nil {
+                return err
+            }
+        }
+    }
+    return nil
+}
+
+// define how each worker work, wait for cfile signal (buffered)
+func (p FileDigester4) md5Worker(cfile <-chan string, cres chan<- result) {
+    for file := range cfile {
+        data, err := ioutil.ReadFile(file)
+        cres <- result{file, md5.Sum(data), err}
+    }
+}
+
+// worker pool: collect candicate files first,
+// then use N go routines to process each file
+func (p FileDigester4) MD5All(root string) (map[string][md5.Size]byte, error) {
+    ts := time.Now()
+    defer func() {
+        fmt.Printf("FileDigester4.MD5All() execute time: %v\n", time.Now().Sub(ts))
+    }()
+
+    files := make([]string, 0)
+    if err := p.walk(root, &files); err != nil { return nil, err }
+
+    n := len(files)
+    cfile := make(chan string, n)
+    cres := make(chan result, n)
+
+    for i := 0; i < n; i++ { go p.md5Worker(cfile, cres) }
+    for i := 0; i < n; i++ { cfile <- files[i] }
+    close(cfile)
+
+    m := make(map[string][md5.Size]byte)
+    for i := 0; i < n; i++ {
+        r := <-cres
+        if r.err != nil {
+            return nil, r.err
+        }
+        m[r.path] = r.sum
+    }
+    close(cres)
+
+    return m, nil
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 func main() {
     flag.Parse()
 
@@ -331,6 +393,8 @@ func main() {
         p = &FileDigester2{}
     case 3:
         p = &FileDigester3{}
+    case 4:
+        p = &FileDigester4{}
     default:
         p = &FileDigester{}
     }
