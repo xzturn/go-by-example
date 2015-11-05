@@ -276,27 +276,23 @@ func (p FileDigester2) MD5All(root string) (map[string][md5.Size]byte, error) {
 type FileDigester3 struct {
 }
 
-func (p FileDigester3) walk(root string, cpath chan<- string) <-chan struct{} {
-    done := make(chan struct{})
+func (p FileDigester3) walk(root string, cpath chan<- string) <-chan error {
+    cerr := make(chan error)
     go func() {
-        if infos, err := ioutil.ReadDir(root); err == nil {
-            for _, info := range infos {
-                switch {
-                case info.Mode().IsRegular():
-                    cpath <- filepath.Join(root, info.Name())
-                case info.Mode().IsDir():
-                    <-p.walk(filepath.Join(root, info.Name()), cpath)
-                }
+        infos, err := ioutil.ReadDir(root)
+        if err != nil { cerr <- err; return }
+        for _, info := range infos {
+            switch {
+            case info.Mode().IsRegular():
+                cpath <- filepath.Join(root, info.Name())
+            case info.Mode().IsDir():
+                err = <-p.walk(filepath.Join(root, info.Name()), cpath)
+                if err != nil { cerr <- err; return }
             }
         }
-        done <- struct{}{}
+        cerr <- nil
     }()
-    return done
-}
-
-func (p FileDigester3) collect(root string) (<-chan string, <-chan struct{}) {
-    cpath := make(chan string)
-    return cpath, p.walk(root, cpath)
+    return cerr
 }
 
 func (p FileDigester3) MD5All(root string) (map[string][md5.Size]byte, error) {
@@ -305,7 +301,8 @@ func (p FileDigester3) MD5All(root string) (map[string][md5.Size]byte, error) {
         fmt.Printf("FileDigester3.MD5All() execute time: %v\n", time.Now().Sub(ts))
     }()
 
-    cpath, done := p.collect(root)
+    cpath := make(chan string)
+    cerr := p.walk(root, cpath)
     m := make(map[string][md5.Size]byte)
     for {
         select {
@@ -313,8 +310,8 @@ func (p FileDigester3) MD5All(root string) (map[string][md5.Size]byte, error) {
             data, err := ioutil.ReadFile(path)
             if err != nil { return nil, err }
             m[path] = md5.Sum(data)
-        case <-done:
-            return m, nil
+        case err := <-cerr:
+            return m, err
         }
     }
 }
