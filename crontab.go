@@ -23,7 +23,7 @@ func work(interval time.Duration, worker chan<- struct{}) {
 }
 
 func main() {
-    n := 10                 // interval in minutes
+    n := 10                 // interval in minutes, 0 < n <= 60
     delta, tnow := time.Duration(n) * time.Minute, time.Now()
     t := time.Date(tnow.Year(), tnow.Month(), tnow.Day(), tnow.Hour(), tnow.Minute() / n * n, 0, 0, time.Local).Add(delta)
     d, worker := t.Sub(tnow), make(chan struct{})
